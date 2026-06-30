@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Cpu, Globe } from 'lucide-react';
 
-export default function LanguageSelector({ onStartAI, loading }) {
+export default function LanguageSelector({ onStartAI, loading, aiProgress, aiStage }) {
   const [selectedLang, setSelectedLang] = useState('en');
 
   return (
@@ -27,10 +27,36 @@ export default function LanguageSelector({ onStartAI, loading }) {
       <button 
         onClick={() => onStartAI(selectedLang)} 
         disabled={loading}
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', background: '#22c55e', color: '#fff', border: 'none', padding: '12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '16px', transition: '0.2s' }}
+        style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center', 
+          gap: '8px', 
+          background: loading ? '#475569' : '#22c55e', 
+          color: '#fff', 
+          border: 'none', 
+          padding: '12px', 
+          borderRadius: '4px', 
+          cursor: loading ? 'not-allowed' : 'pointer', 
+          fontWeight: 'bold', 
+          fontSize: '16px' 
+        }}
       >
-        <Cpu size={18} /> {loading ? 'AI Engine Running...' : 'Generate AI Captions'}
+        <Cpu size={18} /> {loading ? 'AI Engine Processing...' : 'Generate AI Captions'}
       </button>
+
+      {/* Real-time multi-stage AI percentage bar */}
+      {loading && aiProgress > 0 && (
+        <div style={{ marginTop: '8px', background: '#0f172a', padding: '12px', borderRadius: '6px', border: '1px solid #334155' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
+            <span style={{ color: '#38bdf8', fontWeight: '500' }}>⚡ {aiStage}</span>
+            <span style={{ color: '#22c55e', fontWeight: 'bold' }}>{aiProgress}%</span>
+          </div>
+          <div style={{ width: '100%', background: '#334155', height: '6px', borderRadius: '3px', overflow: 'hidden' }}>
+            <div style={{ width: `${aiProgress}%`, background: '#22c55e', height: '100%', transition: 'width 0.4s ease-out' }} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
