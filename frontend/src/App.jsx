@@ -93,7 +93,7 @@ export default function App() {
     <div style={{ fontFamily: 'system-ui, sans-serif', background: '#0f172a', color: '#f8fafc', minHeight: '100vh', padding: '24px' }}>
       <header style={{ borderBottom: '1px solid #334155', paddingBottom: '16px', marginBottom: '24px' }}>
         <h1 style={{ margin: 0, fontSize: '24px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <FileVideo color="#38bdf8" /> Multi-Language Caption Workspace
+          <FileVideo color="#38bdf8" /> Caption Generator
         </h1>
       </header>
 
