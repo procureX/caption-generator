@@ -1,6 +1,7 @@
 import os
 import subprocess
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import srt
@@ -10,16 +11,26 @@ from transcribe import generate_subtitles
 from translator import translate_srt_file
 
 app = FastAPI()
+
+# Tell backend to explicitly permit traffic from local React development server
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],  # Permits GET, POST, PUT, DELETE
+    allow_headers=["*"],
+)
+
 UPLOAD_DIR = "temp_storage"
 
-# 🧠 A Pydantic Model to represent an individual caption block cleanly
+# A Pydantic Model to represent an individual caption block cleanly
 class CaptionLine(BaseModel):
     index: int
     start: str  # Format: "00:00:00"
     end: str    # Format: "00:00:00"
     text: str
 
-# 🧠 A Pydantic Model to receive a list of updated caption blocks
+# A Pydantic Model to receive a list of updated caption blocks
 class UpdateCaptionRequest(BaseModel):
     captions: List[CaptionLine]
 
