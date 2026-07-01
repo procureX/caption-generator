@@ -1,13 +1,13 @@
 import React from 'react';
 import { Globe, Save, Edit3 } from 'lucide-react';
 
-export default function CaptionEditor({ currentLang, onLangChange, onSave, captionLines, onTextChange }) {
+export default function CaptionEditor({ currentLang, onLangChange, onSave, captionLines, onTextChange, isSwitching }) {
   return (
     <div style={{ background: '#1e293b', borderRadius: '8px', padding: '20px', display: 'flex', flexDirection: 'column', maxHeight: '75vh' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid #334155', paddingBottom: '12px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Globe size={18} color="#38bdf8" />
-          <select value={currentLang} onChange={(e) => onLangChange(e.target.value)} style={{ background: '#0f172a', color: '#fff', border: '1px solid #475569', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>
+          <select value={currentLang} onChange={(e) => onLangChange(e.target.value)} disabled={isSwitching} style={{ background: '#0f172a', color: '#fff', border: '1px solid #475569', padding: '6px 12px', borderRadius: '4px', cursor: isSwitching ? 'not-allowed' : 'pointer' }}>
             <option value="en">English (Original)</option>
             <option value="es">Spanish (Español)</option>
             <option value="ur">Urdu (اردو)</option>

@@ -14,7 +14,7 @@ import ProgressBar from './components/ProgressBar';
 import useVideoWorkspace from './hooks/useVideoWorkspace';
 
 export default function App() {
-  // Destructure state machine boundaries cleanly from the abstracted custom hook
+  // Destructure the correct 4-bar progress tracking variables from your hook
   const {
     videoFile,
     videoUrl,
@@ -27,12 +27,12 @@ export default function App() {
     uploadProgress,
     ffmpegProgress,
     isExtracting,
-    aiProgress,
-    aiStage,
+    transcribeProgress,
+    translateProgress,
     isAiLoading,
     handleFileUpload,
     handleStartAIEngine,
-    fetchCaptions,
+    switchLanguage,
     handleTextChange,
     saveCaptionEdits
   } = useVideoWorkspace();
@@ -66,7 +66,7 @@ export default function App() {
               {/* Local File Media Canvas Player Component */}
               <VideoPlayer videoUrl={videoUrl} videoName={videoFile?.name} />
               
-              {/* 📊 METER 1: Persistent Network File Upload Track */}
+              {/* 📊 BAR 1: Persistent Network Upload */}
               {uploadProgress > 0 && (
                 <ProgressBar 
                   title="1. File Upload Status" 
@@ -76,7 +76,7 @@ export default function App() {
                 />
               )}
 
-              {/* 📊 METER 2: Independent Hardware FFmpeg Conversion Track */}
+              {/* 📊 BAR 2: Independent Hardware FFmpeg Extraction */}
               {(isExtracting || ffmpegProgress > 0) && (
                 <ProgressBar 
                   title="2. FFmpeg Audio Extraction" 
@@ -86,13 +86,31 @@ export default function App() {
                 />
               )}
 
+              {/* 📊 BAR 3: Real Whisper Neural Transcription Progress */}
+              {(isAiLoading || transcribeProgress > 0) && (
+                <ProgressBar 
+                  title="3. AI Vocal Transcription Engine" 
+                  percentage={transcribeProgress} 
+                  activeColor="#eab308" 
+                  isComplete={transcribeProgress === 100}
+                />
+              )}
+
+              {/* 📊 BAR 4: Contextual Translation Script Progress */}
+              {(isAiLoading || translateProgress > 0) && currentLang !== 'en' && (
+                <ProgressBar 
+                  title="4. Language Translation Engine Matrix" 
+                  percentage={translateProgress} 
+                  activeColor="#ec4899" 
+                  isComplete={translateProgress === 100}
+                />
+              )}
+
               {/* Configurations Control Block Panel */}
               {!aiGenerated && !isExtracting && !loading && (
                 <LanguageSelector 
                   onStartAI={handleStartAIEngine} 
                   loading={isAiLoading} 
-                  aiProgress={aiProgress}
-                  aiStage={aiStage}
                 />
               )}
             </>
@@ -104,10 +122,11 @@ export default function App() {
           <div style={{ maxHeight: 'calc(100vh - 120px)', overflowY: 'auto', background: '#111827', borderRadius: '8px', border: '1px solid #1e293b', padding: '4px' }}>
             <CaptionEditor 
               currentLang={currentLang}
-              onLangChange={(lang) => fetchCaptions(baseFilename, lang)}
+              onLangChange={switchLanguage}
               onSave={saveCaptionEdits}
               captionLines={captionLines}
               onTextChange={handleTextChange}
+              isSwitching={isAiLoading}
             />
           </div>
         )}

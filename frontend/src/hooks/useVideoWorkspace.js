@@ -1,35 +1,26 @@
-import { useState, useRef, useEffect } from 'react';
-import { apiService } from '../services/api';
+import { useState, useEffect } from 'react';
 
 export default function useVideoWorkspace() {
   const [videoFile, setVideoFile] = useState(null);
-  const [videoUrl, setVideoUrl] = useState('');
+  const [videoUrl, setVideoUrl] = useState(null);
   const [baseFilename, setBaseFilename] = useState('');
   const [currentLang, setCurrentLang] = useState('en');
   const [captionLines, setCaptionLines] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
   const [message, setMessage] = useState('');
   const [aiGenerated, setAiGenerated] = useState(false);
+  // Tracks which languages actually have an .srt file on disk for this video
+  const [generatedLangs, setGeneratedLangs] = useState(new Set());
 
-  // Consolidated Pipeline Progress Tracking States
+  // 4-Bar discrete progress metrics
   const [uploadProgress, setUploadProgress] = useState(0);
   const [ffmpegProgress, setFfmpegProgress] = useState(0);
-  const [isExtracting, setIsExtracting] = useState(false);
-  const [aiProgress, setAiProgress] = useState(0);
-  const [aiStage, setAiStage] = useState('');
-  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [transcribeProgress, setTranscribeProgress] = useState(0);
+  const [translateProgress, setTranslateProgress] = useState(0);
 
-  // Use a mutable ref container to persist the tracking timer across render states safely
-  const aiIntervalRef = useRef(null);
-
-  // Lifecycle garbage collection cleanup: Kills background tasks if components unmount
-  useEffect(() => {
-    return () => {
-      if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
-    };
-  }, []);
-
-  // Execution Flow 1: File Storage and SSE Streaming Pipeline Interception
+  // 1. Handle File Upload Sequence
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -39,112 +30,230 @@ export default function useVideoWorkspace() {
     setLoading(true);
     setUploadProgress(1);
     setFfmpegProgress(0);
-    setIsExtracting(false);
+    setTranscribeProgress(0);
+    setTranslateProgress(0);
+    setAiGenerated(false);
     setMessage('Uploading media payload to core storage...');
 
+    const formData = new FormData();
+    formData.append('file', file);
+
     try {
-      const uploadData = await apiService.uploadVideo(file, (percent) => {
-        setUploadProgress(percent);
+      // Direct XHR/Fetch approach to guarantee upload progress visibility
+      const response = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', 'http://localhost:8000/upload');
+        
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const pct = Math.round((event.loaded / event.total) * 100);
+            setUploadProgress(pct);
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(JSON.parse(xhr.responseText));
+          } else {
+            reject(new Error('Upload status failed on server side.'));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network context error.'));
+        xhr.send(formData);
       });
 
+      setBaseFilename(response.base_filename);
       setIsExtracting(true);
-      setMessage('Network transmission complete. Beginning hardware FFmpeg transcode processing loop...');
+      setMessage('Network transmission complete. Running hardware FFmpeg transcode loop...');
 
-      apiService.trackAudioProgress(
-        uploadData.filename,
-        (progress, eventSource) => {
-          setFfmpegProgress(progress);
-          if (progress >= 100) {
-            eventSource.close();
-            setIsExtracting(false);
-            setLoading(false);
-            setMessage('Audio processing complete! Select a workspace target language below.');
-          }
-        },
-        () => {
+      // Establish SSE connection stream for audio extraction monitoring
+      const audioSSE = new EventSource(`http://localhost:8000/extract-audio-progress/${response.filename}`);
+      
+      audioSSE.onmessage = (event) => {
+        const progress = parseInt(event.data, 10);
+        setFfmpegProgress(progress);
+        if (progress >= 100) {
+          audioSSE.close();
           setIsExtracting(false);
           setLoading(false);
-          setMessage('Error occurred mapping sub-process progress loops.');
+          setMessage('Audio track compilation complete! Select target language parameters below.');
         }
-      );
+      };
+
+      audioSSE.onerror = () => {
+        audioSSE.close();
+        setIsExtracting(false);
+        setLoading(false);
+        setMessage('Error occurred tracking background transcode tasks.');
+      };
 
     } catch (err) {
-      setMessage(`System processing failure: ${err.message}`);
+      console.error(err);
+      setMessage(`Workflow breakdown: ${err.message}`);
       setLoading(false);
     }
   };
 
-  // Execution Flow 2: Trigger Whisper AI & Safe Simulation Interpolation
-  const handleStartAIEngine = async (targetLang) => {
-    // Standard defensive code: Clear lingering timers before spinning up a new one
-    if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
-
+  // 2. Handle AI Generation Pipeline Stream (Whisper + Translation Matrix)
+  const handleStartAIEngine = async (targetLanguage) => {
+    if (!baseFilename) return;
+    
     setIsAiLoading(true);
-    setAiProgress(5);
-    setAiStage('Booting translation blocks and loading system audio...');
-    setMessage('Processing your request...');
+    setCurrentLang(targetLanguage);
+    setTranscribeProgress(1);
+    setTranslateProgress(0);
+    setMessage('Connecting to AI Generation Engine Pipeline...');
 
-    aiIntervalRef.current = setInterval(() => {
-      setAiProgress((prev) => {
-        if (prev < 45) return prev + 3;
-        if (prev >= 45 && prev < 85) return prev + 2;
-        if (prev >= 85 && prev < 98) return prev + 1;
-        return prev;
-      });
-    }, 400);
+    let pipelineFailed = false;
 
     try {
-      await apiService.generateCaptions(baseFilename, targetLang);
+      // Open a native POST request via fetch to initiate, then track via an SSE channel or convert payload matching
+      // Since native EventSource only does GET, we map parameter configurations safely
+      const url = `http://localhost:8000/generate/${baseFilename}`;
       
-      clearInterval(aiIntervalRef.current);
-      setAiProgress(100);
-      setAiStage('Processing complete!');
+      // Let's create an asynchronous fetch reader to process the streaming data smoothly
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lang: targetLanguage })
+      });
+
+      if (!response.ok) throw new Error('AI pipeline rejected generation parameters.');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep partial line in buffer
+
+        let currentEvent = '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.replace('event:', '').trim();
+          } else if (trimmed.startsWith('data:')) {
+            const dataVal = trimmed.replace('data:', '').trim();
+
+            // Process text values based on the preceding custom event types
+            if (currentEvent === 'transcription_start' || currentEvent === 'translation_start') {
+              setMessage(dataVal);
+            } else if (currentEvent === 'transcription_progress') {
+              setTranscribeProgress(parseInt(dataVal, 10));
+            } else if (currentEvent === 'transcription_complete') {
+              setTranscribeProgress(100);
+            } else if (currentEvent === 'translation_progress') {
+              setTranslateProgress(parseInt(dataVal, 10));
+            } else if (currentEvent === 'translation_complete') {
+              setTranslateProgress(100);
+            } else if (currentEvent === 'error') {
+              pipelineFailed = true;
+              setMessage(`Engine breakdown: ${dataVal}`);
+            }
+          }
+        }
+      }
+
+      if (pipelineFailed) {
+        setIsAiLoading(false);
+        return;
+      }
+
+      // Finalize pipeline completion states safely 🚀
+      setTranscribeProgress(100);
+      if (targetLanguage !== 'en') setTranslateProgress(100);
+      
+      setMessage('AI processing cycles successfully completed! Rendering layout matrices...');
+      // Whisper always produces an English transcript regardless of target,
+      // plus the target language itself (translation is skipped if target === 'en').
+      setGeneratedLangs((prev) => new Set(prev).add('en').add(targetLanguage));
+      await fetchCaptions(baseFilename, targetLanguage);
       setAiGenerated(true);
-      setMessage('Captions generated successfully!');
-      
-      const captions = await apiService.getCaptions(baseFilename, targetLang);
-      setCaptionLines(captions);
-      setCurrentLang(targetLang);
+      setIsAiLoading(false);
+
     } catch (err) {
-      clearInterval(aiIntervalRef.current);
-      setAiProgress(0);
-      setAiStage('');
-      setMessage(`AI Engine Error: ${err.message}`);
-    } finally {
+      console.error(err);
+      setMessage(`AI Pipeline Interruption: ${err.message}`);
       setIsAiLoading(false);
     }
   };
 
+  // 3. Fetch Generated Subtitle Arrays from disk
   const fetchCaptions = async (filename, lang) => {
     try {
-      const captions = await apiService.getCaptions(filename, lang);
-      setCaptionLines(captions);
+      const res = await fetch(`http://localhost:8000/captions/${filename}/${lang}`);
+      if (!res.ok) throw new Error('Requested caption block is missing from filesystem storage.');
+      const data = await res.json();
+      setCaptionLines(data.captions);
       setCurrentLang(lang);
     } catch (err) {
-      setMessage('Error fetching timelines.');
+      setMessage(`Failed fetching language blocks: ${err.message}`);
     }
   };
 
-  const handleTextChange = (index, newText) => {
-    const updated = [...captionLines];
-    updated[index].text = newText;
-    setCaptionLines(updated);
+  // 3b. Switch the caption editor's active language, generating it first if it
+  // doesn't exist on disk yet (this is what the CaptionEditor dropdown should call —
+  // NOT fetchCaptions directly, since a language may never have been generated).
+  const switchLanguage = async (lang) => {
+    if (generatedLangs.has(lang)) {
+      await fetchCaptions(baseFilename, lang);
+      return;
+    }
+    // Not generated yet — run the pipeline for this language, then fetch it.
+    await handleStartAIEngine(lang);
   };
 
+  // 4. Handle Realtime Text Edits in Form Blocks
+  const handleTextChange = (index, updatedText) => {
+    setCaptionLines((prev) =>
+      prev.map((line) => (line.index === index ? { ...line, text: updatedText } : line))
+    );
+  };
+
+  // 5. Commit Modified Captions back to server files
   const saveCaptionEdits = async () => {
-    if (!baseFilename) return;
     try {
-      setMessage('Committing changes safely to file system...');
-      const result = await apiService.updateCaptions(baseFilename, currentLang, captionLines);
-      setMessage(result.message || 'Successfully updated!');
+      const res = await fetch(`http://localhost:8000/captions/${baseFilename}/${currentLang}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ captions: captionLines })
+      });
+      if (!res.ok) throw new Error('Server storage rejected patch array payload update.');
+      setMessage('All text layer changes successfully written back to system storage!');
     } catch (err) {
-      setMessage('Error updating disk entities.');
+      setMessage(`Failed committing layout edits: ${err.message}`);
     }
   };
 
   return {
-    videoFile, videoUrl, baseFilename, currentLang, captionLines, loading, message, aiGenerated,
-    uploadProgress, ffmpegProgress, isExtracting, aiProgress, aiStage, isAiLoading,
-    handleFileUpload, handleStartAIEngine, fetchCaptions, handleTextChange, saveCaptionEdits
+    videoFile,
+    videoUrl,
+    baseFilename,
+    currentLang,
+    captionLines,
+    loading,
+    message,
+    aiGenerated,
+    uploadProgress,
+    ffmpegProgress,
+    isExtracting,
+    transcribeProgress,
+    translateProgress,
+    isAiLoading,
+    generatedLangs,
+    handleFileUpload,
+    handleStartAIEngine,
+    fetchCaptions,
+    switchLanguage,
+    handleTextChange,
+    saveCaptionEdits
   };
 }

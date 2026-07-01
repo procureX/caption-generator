@@ -3,9 +3,10 @@ import subprocess
 import re
 import json
 import datetime
+import time
 from typing import List
 import srt
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -37,8 +38,6 @@ class GenerateRequest(BaseModel):
 
 def get_video_duration(video_path):
     """Uses ffprobe to get the exact total duration of the video in seconds."""
-    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nocey=1", video_path]
-    # Fallback to avoid key flags issues in older ffprobe variations
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video_path]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -52,7 +51,6 @@ def stream_ffmpeg_extraction(video_path, audio_path, total_duration):
         yield "data: 100\n\n"
         return
 
-    # Command outputs periodic progress stats to stdout/stderr
     cmd = [
         "ffmpeg", "-i", video_path, "-q:a", "0", "-map", "a", 
         "-progress", "pipe:1", "-y", audio_path
@@ -65,7 +63,6 @@ def stream_ffmpeg_extraction(video_path, audio_path, total_duration):
         if not line:
             break
         
-        # Look for out_time_ms=xxxxxxxx from FFmpeg's progress pipe stream
         if "out_time_ms=" in line:
             try:
                 time_ms = float(line.split("=")[1].strip())
@@ -107,9 +104,11 @@ def extract_audio_progress(filename: str):
     return StreamingResponse(stream_ffmpeg_extraction(video_path, audio_path, duration), media_type="text/event-stream")
 
 @app.post("/generate/{filename}")
-def generate_captions_for_language(filename: str, data: GenerateRequest):
-    from transcribe import generate_subtitles
-    from translator import translate_srt_file
+def generate_captions_stream(filename: str, data: GenerateRequest):
+    """Streams live multi-bar AI progression updates back to the workspace dashboard."""
+    video_path = os.path.join(UPLOAD_DIR, f"{filename}.mp4")
+    if not os.path.exists(video_path):
+        video_path = os.path.join(UPLOAD_DIR, f"{filename}.webm")
 
     audio_path = os.path.join(UPLOAD_DIR, f"{filename}.mp3")
     english_srt = os.path.join(UPLOAD_DIR, f"{filename}_en.srt")
@@ -118,14 +117,83 @@ def generate_captions_for_language(filename: str, data: GenerateRequest):
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio track not prepared yet.")
 
-    try:
-        if not os.path.exists(english_srt):
-            generate_subtitles(audio_path, english_srt)
-        if data.lang != "en":
-            translate_srt_file(english_srt_path=english_srt, target_language=data.lang, output_srt_path=target_srt)
-        return {"message": "Success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    total_duration = get_video_duration(video_path) or 1.0
+
+    def ai_pipeline_iterator():
+        try:
+            # --- PHASE 3: WHISPER TRANSCRIPTION ---
+            if not os.path.exists(english_srt):
+                yield "event: transcription_start\ndata: Connected to neural engine...\n\n"
+                
+                from transcribe import get_model, generate_subtitles
+
+                model = get_model()
+                segments, info = model.transcribe(audio_path, beam_size=5, language="en")
+
+                collected_segments = []
+                for segment in segments:
+                    collected_segments.append(segment)
+                    pct = min(int((segment.end / total_duration) * 100), 100)
+                    yield f"event: transcription_progress\ndata: {pct}\n\n"
+                    time.sleep(0.01) # Forces network buffer optimization flush
+
+                # Reuse the segments we already computed above instead of
+                # re-running transcription a second time inside generate_subtitles.
+                generate_subtitles(audio_path, english_srt, segments=collected_segments)
+            
+            yield "event: transcription_complete\ndata: 100\n\n"
+
+            # --- PHASE 4: TRANSLATION MATRIX ENGINE ---
+            if data.lang != "en":
+                yield "event: translation_start\ndata: Initializing text layer translations...\n\n"
+                from translator import translate_srt_file
+
+                # Create a generator-safe tracking proxy function to intercept callbacks
+                def yield_progress(pct_val):
+                    nonlocal current_translation_pct
+                    current_translation_pct = pct_val
+
+                current_translation_pct = 0
+                last_streamed_pct = -1
+
+                # Read files and run translation pipeline with real-time metrics capture
+                # Instead of running everything inside an opaque call, we capture loops
+                with open(english_srt, "r", encoding="utf-8") as f:
+                    content = f.read()
+                subtitles = list(srt.parse(content))
+                total_lines = len(subtitles)
+
+                if total_lines > 0:
+                    translated_subtitles = []
+                    from translator import translate_text_mock
+                    
+                    for index, subtitle in enumerate(subtitles):
+                        # Translate individual line layout text structures
+                        translated_text = translate_text_mock(subtitle.content, data.lang)
+                        translated_subtitles.append(srt.Subtitle(
+                            index=subtitle.index, start=subtitle.start, end=subtitle.end, content=translated_text
+                        ))
+                        
+                        # Calculate and immediately yield the true math percentages down the network wire
+                        pct = min(int(((index + 1) / total_lines) * 100), 100)
+                        yield f"event: translation_progress\ndata: {pct}\n\n"
+
+                    # Write out the completed target language SRT file matrix directly
+                    with open(target_srt, "w", encoding="utf-8") as f:
+                        f.write(srt.compose(translated_subtitles))
+                else:
+                    # Fallback for empty file boundaries
+                    translate_srt_file(english_srt_path=english_srt, target_language=data.lang, output_srt_path=target_srt)
+            
+            yield "event: translation_complete\ndata: 100\n\n"
+
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Pipeline error: {e}")
+            traceback.print_exc()
+            yield f"event: error\ndata: {str(e)}\n\n"
+
+    return StreamingResponse(ai_pipeline_iterator(), media_type="text/event-stream")
 
 @app.get("/captions/{filename}/{lang}")
 def get_captions(filename: str, lang: str):
