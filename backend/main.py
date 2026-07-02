@@ -268,6 +268,8 @@ def burn_in_captions(filename: str, lang: str):
             cmd = [
                 "ffmpeg", "-i", video_path,
                 "-vf", build_subtitles_filter(srt_path),
+                "-c:v", "libx264",
+                "-preset", "veryfast",
                 "-c:a", "copy",
                 "-progress", "pipe:1",
                 "-y", output_path,
