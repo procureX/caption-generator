@@ -20,6 +20,12 @@ export default function useVideoWorkspace() {
   const [transcribeProgress, setTranscribeProgress] = useState(0);
   const [translateProgress, setTranslateProgress] = useState(0);
 
+  // Burn-in (hardcoded captions) state
+  const [isBurning, setIsBurning] = useState(false);
+  const [burnInProgress, setBurnInProgress] = useState(0);
+  const [burnInStage, setBurnInStage] = useState('');
+  const [burnInDownloadUrl, setBurnInDownloadUrl] = useState(null);
+
   // 1. Handle File Upload Sequence
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
@@ -233,6 +239,73 @@ export default function useVideoWorkspace() {
     }
   };
 
+  // 6. Burn the current language's captions directly into the video via ffmpeg,
+  // streaming progress over SSE, then exposing a download link for the result.
+  const startBurnIn = async () => {
+    if (!baseFilename || !currentLang) return;
+
+    setIsBurning(true);
+    setBurnInProgress(0);
+    setBurnInStage('Connecting to render engine...');
+    setBurnInDownloadUrl(null);
+
+    let pipelineFailed = false;
+
+    try {
+      const url = `http://localhost:8000/burn-in/${encodeURIComponent(baseFilename)}/${encodeURIComponent(currentLang)}`;
+      const response = await fetch(url, { method: 'POST' });
+
+      if (!response.ok) throw new Error('Burn-in request rejected by server.');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        let currentEvent = '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.replace('event:', '').trim();
+          } else if (trimmed.startsWith('data:')) {
+            const dataVal = trimmed.replace('data:', '').trim();
+
+            if (currentEvent === 'burn_in_progress') {
+              setBurnInProgress(parseInt(dataVal, 10));
+              setBurnInStage('Rendering hardcoded captions onto video...');
+            } else if (currentEvent === 'burn_in_complete') {
+              setBurnInProgress(100);
+              setBurnInStage('Burned-in video ready!');
+              setBurnInDownloadUrl(`http://localhost:8000/download-video/${dataVal}`);
+            } else if (currentEvent === 'error') {
+              pipelineFailed = true;
+              setBurnInStage(`Burn-in failed: ${dataVal}`);
+            }
+          }
+        }
+      }
+
+      if (pipelineFailed) {
+        setMessage('Burn-in failed — check the backend console for details.');
+      }
+    } catch (err) {
+      console.error(err);
+      setBurnInStage(`Burn-in interruption: ${err.message}`);
+    } finally {
+      setIsBurning(false);
+    }
+  };
+
   return {
     videoFile,
     videoUrl,
@@ -249,11 +322,16 @@ export default function useVideoWorkspace() {
     translateProgress,
     isAiLoading,
     generatedLangs,
+    isBurning,
+    burnInProgress,
+    burnInStage,
+    burnInDownloadUrl,
     handleFileUpload,
     handleStartAIEngine,
     fetchCaptions,
     switchLanguage,
     handleTextChange,
-    saveCaptionEdits
+    saveCaptionEdits,
+    startBurnIn
   };
 }

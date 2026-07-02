@@ -8,7 +8,7 @@ from typing import List
 import srt
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 
 app = FastAPI()
@@ -44,6 +44,16 @@ def get_video_duration(video_path):
         return float(result.stdout.strip())
     except ValueError:
         return 0.0
+
+def build_subtitles_filter(srt_path: str) -> str:
+    """
+    Builds an ffmpeg -vf subtitles=... filter argument with the path properly
+    escaped. ffmpeg's filtergraph syntax treats ':', '\\', and '\'' specially,
+    so raw paths (especially containing spaces or drive letters) need escaping.
+    """
+    abs_path = os.path.abspath(srt_path)
+    escaped = abs_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    return f"subtitles='{escaped}'"
 
 def stream_ffmpeg_extraction(video_path, audio_path, total_duration):
     """Runs FFmpeg and yields progress percentages periodically as chunks compile."""
@@ -137,8 +147,6 @@ def generate_captions_stream(filename: str, data: GenerateRequest):
                     yield f"event: transcription_progress\ndata: {pct}\n\n"
                     time.sleep(0.01) # Forces network buffer optimization flush
 
-                # Reuse the segments we already computed above instead of
-                # re-running transcription a second time inside generate_subtitles.
                 generate_subtitles(audio_path, english_srt, segments=collected_segments)
             
             yield "event: transcription_complete\ndata: 100\n\n"
@@ -216,3 +224,71 @@ def update_captions(filename: str, lang: str, data: UpdateCaptionRequest):
     with open(srt_path, "w", encoding="utf-8") as f:
         f.write(srt.compose(blocks))
     return {"message": "Successfully updated!"}
+
+@app.post("/burn-in/{filename}/{lang}")
+def burn_in_captions(filename: str, lang: str):
+    """Hardcodes (burns in) the given language's captions onto the video via
+    ffmpeg's subtitles filter, streaming progress back over SSE."""
+    video_path = os.path.join(UPLOAD_DIR, f"{filename}.mp4")
+    if not os.path.exists(video_path):
+        video_path = os.path.join(UPLOAD_DIR, f"{filename}.webm")
+
+    srt_path = os.path.join(UPLOAD_DIR, f"{filename}_{lang}.srt")
+    output_path = os.path.join(UPLOAD_DIR, f"{filename}_{lang}_burned.mp4")
+
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Source video missing.")
+    if not os.path.exists(srt_path):
+        raise HTTPException(status_code=404, detail=f"No generated captions found for language '{lang}'. Generate them first.")
+
+    total_duration = get_video_duration(video_path) or 1.0
+
+    def stream_burn_in():
+        process = None
+        try:
+            cmd = [
+                "ffmpeg", "-i", video_path,
+                "-vf", build_subtitles_filter(srt_path),
+                "-c:a", "copy",
+                "-progress", "pipe:1",
+                "-y", output_path,
+            ]
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                if "out_time_ms=" in line:
+                    try:
+                        time_ms = float(line.split("=")[1].strip())
+                        current_seconds = time_ms / 1000000.0
+                        pct = min(int((current_seconds / total_duration) * 100), 100)
+                        yield f"event: burn_in_progress\ndata: {pct}\n\n"
+                    except Exception:
+                        pass
+
+            return_code = process.wait()
+            if return_code != 0:
+                stderr_output = process.stderr.read() if process.stderr else ""
+                raise RuntimeError(f"ffmpeg exited with code {return_code}: {stderr_output[-500:]}")
+
+            output_filename = os.path.basename(output_path)
+            yield f"event: burn_in_complete\ndata: {output_filename}\n\n"
+
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Burn-in error: {e}")
+            traceback.print_exc()
+            yield f"event: error\ndata: {str(e)}\n\n"
+
+    return StreamingResponse(stream_burn_in(), media_type="text/event-stream")
+
+@app.get("/download-video/{filename}")
+def download_video(filename: str):
+    """Serves a video file (e.g. a burned-in output) as a downloadable attachment,
+    and also works for previewing it inline (e.g. a <video> tag src)."""
+    video_path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Video not found.")
+    return FileResponse(video_path, media_type="video/mp4", filename=filename)

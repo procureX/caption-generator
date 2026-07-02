@@ -30,11 +30,16 @@ export default function App() {
     transcribeProgress,
     translateProgress,
     isAiLoading,
+    isBurning,
+    burnInProgress,
+    burnInStage,
+    burnInDownloadUrl,
     handleFileUpload,
     handleStartAIEngine,
     switchLanguage,
     handleTextChange,
-    saveCaptionEdits
+    saveCaptionEdits,
+    startBurnIn
   } = useVideoWorkspace();
 
   return (
@@ -127,6 +132,11 @@ export default function App() {
               captionLines={captionLines}
               onTextChange={handleTextChange}
               isSwitching={isAiLoading}
+              onStartBurnIn={startBurnIn}
+              isBurning={isBurning}
+              burnInProgress={burnInProgress}
+              burnInStage={burnInStage}
+              burnInDownloadUrl={burnInDownloadUrl}
             />
           </div>
         )}
